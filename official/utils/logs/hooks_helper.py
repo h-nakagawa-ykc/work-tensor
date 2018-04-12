@@ -56,6 +56,8 @@ def get_train_hooks(name_list, **kwargs):
 
   train_hooks = []
   for name in name_list:
+    if not len(name):
+      continue  # Allows user to specify no hooks from the CLI.
     hook_name = HOOKS.get(name.strip().lower())
     if hook_name is None:
       raise ValueError('Unrecognized training hook requested: {}'.format(name))

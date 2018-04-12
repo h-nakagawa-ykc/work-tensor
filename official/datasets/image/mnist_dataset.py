@@ -26,6 +26,17 @@ import numpy as np
 from six.moves import urllib
 import tensorflow as tf
 
+from official.utils.misc import file_helpers
+
+
+IMAGE_SIZE = 28
+NUM_CLASSES = 10
+
+NUM_IMAGES = {
+  'train': 60000,
+  'validation': 10000,
+}
+
 
 def read32(bytestream):
   """Read 4 bytes from bytestream as an unsigned 32-bit integer."""
@@ -43,7 +54,7 @@ def check_image_file_header(filename):
     if magic != 2051:
       raise ValueError('Invalid magic number %d in MNIST file %s' % (magic,
                                                                      f.name))
-    if rows != 28 or cols != 28:
+    if rows != IMAGE_SIZE or cols != IMAGE_SIZE:
       raise ValueError(
           'Invalid MNIST file %s: Expected 28x28 images, found %dx%d' %
           (f.name, rows, cols))
@@ -58,27 +69,15 @@ def check_labels_file_header(filename):
       raise ValueError('Invalid magic number %d in MNIST file %s' % (magic,
                                                                      f.name))
 
-
 def download(directory, filename):
   """Download (and unzip) a file from the MNIST dataset if not already done."""
   filepath = os.path.join(directory, filename)
-  if tf.gfile.Exists(filepath):
-    return filepath
-  if not tf.gfile.Exists(directory):
-    tf.gfile.MakeDirs(directory)
-  # CVDF mirror of http://yann.lecun.com/exdb/mnist/
   url = 'https://storage.googleapis.com/cvdf-datasets/mnist/' + filename + '.gz'
-  _, zipped_filepath = tempfile.mkstemp(suffix='.gz')
-  print('Downloading %s to %s' % (url, zipped_filepath))
-  urllib.request.urlretrieve(url, zipped_filepath)
-  with gzip.open(zipped_filepath, 'rb') as f_in, \
-      tf.gfile.Open(filepath, 'wb') as f_out:
-    shutil.copyfileobj(f_in, f_out)
-  os.remove(zipped_filepath)
+  file_helpers.download_and_extract(dest_directory=directory, data_url=url)
   return filepath
 
 
-def dataset(directory, images_file, labels_file):
+def construct_dataset(directory, images_file, labels_file):
   """Download and parse MNIST dataset."""
 
   images_file = download(directory, images_file)
@@ -91,7 +90,7 @@ def dataset(directory, images_file, labels_file):
     # Normalize from [0, 255] to [0.0, 1.0]
     image = tf.decode_raw(image, tf.uint8)
     image = tf.cast(image, tf.float32)
-    image = tf.reshape(image, [784])
+    image = tf.reshape(image, [IMAGE_SIZE ** 2])
     return image / 255.0
 
   def decode_label(label):
@@ -100,7 +99,7 @@ def dataset(directory, images_file, labels_file):
     return tf.to_int32(label)
 
   images = tf.data.FixedLengthRecordDataset(
-      images_file, 28 * 28, header_bytes=16).map(decode_image)
+      images_file, IMAGE_SIZE * IMAGE_SIZE, header_bytes=16).map(decode_image)
   labels = tf.data.FixedLengthRecordDataset(
       labels_file, 1, header_bytes=8).map(decode_label)
   return tf.data.Dataset.zip((images, labels))
@@ -108,10 +107,67 @@ def dataset(directory, images_file, labels_file):
 
 def train(directory):
   """tf.data.Dataset object for MNIST training data."""
-  return dataset(directory, 'train-images-idx3-ubyte',
-                 'train-labels-idx1-ubyte')
+  return construct_dataset(directory, 'train-images-idx3-ubyte',
+                           'train-labels-idx1-ubyte')
 
 
 def test(directory):
   """tf.data.Dataset object for MNIST test data."""
-  return dataset(directory, 't10k-images-idx3-ubyte', 't10k-labels-idx1-ubyte')
+  return construct_dataset(directory, 't10k-images-idx3-ubyte',
+                           't10k-labels-idx1-ubyte')
+
+
+def make_training_input_fn(data_dir, use_tpu, default_batch_size,
+                           repeat_epochs=None):
+  """Constructs an input function for Estimator to use during training.
+
+  Args:
+    data_dir: The location of the raw data files.
+    use_tpu: Whether or not training will occur on a TPU.
+    default_batch_size: The number of examples in each batch.
+    repeat_epochs: The number of epochs that the dataset should yield. This
+      parameter is forced to None if use_tpu is True."""
+  # type: (str, bool, bool) -> function
+  buffer_size = NUM_IMAGES["train"]
+  repeat_epochs = None if use_tpu else repeat_epochs
+  def input_fn(params):
+    # type: (dict) -> tf.data.Dataset
+
+    # The reason for this redundancy is a difference in the Estimator and
+    # TPUEstimator APIs. TPUEstimator automatically populates batch_size, and
+    # does not allow users to set that field. This code is compatible with
+    # both APIs, which still respecting TPUEstimator's parameter.
+    batch_size = params.get("batch_size", default_batch_size)
+
+    dataset = train(data_dir).cache().repeat(repeat_epochs).shuffle(
+        buffer_size=buffer_size)
+    dataset = (
+      # TPUs do not allow fractional batches.
+      dataset.apply(tf.contrib.data.batch_and_drop_remainder(batch_size))
+      if use_tpu else dataset.batch(batch_size)
+    )
+    return dataset
+  return input_fn
+
+
+def make_eval_input_fn(data_dir, use_tpu, default_batch_size):
+  """Constructs an input function for Estimator to use during evaluation.
+
+  Args:
+    data_dir: The location of the raw data files.
+    use_tpu: Whether or not training will occur on a TPU.
+    default_batch_size: The number of examples in each batch."""
+  # type: (str, bool) -> function
+  def input_fn(params):
+    # type: (dict) -> tf.data.Dataset
+
+    # See above.
+    batch_size = params.get("batch_size", default_batch_size)
+
+    dataset = test(data_dir)
+    return (
+      # TPUs do not allow fractional batches.
+      dataset.apply(tf.contrib.data.batch_and_drop_remainder(batch_size))
+      if use_tpu else dataset.batch(batch_size)
+    ).make_one_shot_iterator().get_next()
+  return input_fn

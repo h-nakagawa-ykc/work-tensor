@@ -34,7 +34,7 @@ import time
 import tensorflow as tf  # pylint: disable=g-bad-import-order
 import tensorflow.contrib.eager as tfe  # pylint: disable=g-bad-import-order
 
-from official.mnist import dataset as mnist_dataset
+from official.datasets.image import mnist_dataset
 from official.mnist import mnist
 from official.utils.arg_parsers import parsers
 

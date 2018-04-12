@@ -18,19 +18,25 @@ from __future__ import division
 from __future__ import print_function
 
 import argparse
+import os
 import sys
 
 import tensorflow as tf  # pylint: disable=g-bad-import-order
 
-from official.mnist import dataset
+from official.datasets.image import mnist_dataset
+from official.utils.arg_parsers import accelerator
+from official.utils.arg_parsers import base
 from official.utils.arg_parsers import parsers
 from official.utils.logs import hooks_helper
+from official.utils.misc import device
+
+
 from official.utils.misc import model_helpers
 
 LEARNING_RATE = 1e-4
 
 
-def create_model(data_format):
+def create_model(data_format, image_size=mnist_dataset.IMAGE_SIZE):
   """Model to recognize digits in the MNIST dataset.
 
   Network structure is equivalent to:
@@ -45,15 +51,17 @@ def create_model(data_format):
       typically faster on GPUs while 'channels_last' is typically faster on
       CPUs. See
       https://www.tensorflow.org/performance/performance_guide#data_formats
+    image_size: The side length of an image. Images are assumed to be
+      image_size x image_size square images. MNIST images are 28x28 pixels.
 
   Returns:
     A tf.keras.Model.
   """
   if data_format == 'channels_first':
-    input_shape = [1, 28, 28]
+    input_shape = [1, image_size, image_size]
   else:
     assert data_format == 'channels_last'
-    input_shape = [28, 28, 1]
+    input_shape = [image_size, image_size, 1]
 
   l = tf.keras.layers
   max_pool = l.MaxPooling2D(
@@ -64,15 +72,15 @@ def create_model(data_format):
       [
           l.Reshape(input_shape),
           l.Conv2D(
-              32,
-              5,
+              filters=32,
+              kernel_size=5,
               padding='same',
               data_format=data_format,
               activation=tf.nn.relu),
           max_pool,
           l.Conv2D(
-              64,
-              5,
+              filters=64,
+              kernel_size=5,
               padding='same',
               data_format=data_format,
               activation=tf.nn.relu),
@@ -84,36 +92,46 @@ def create_model(data_format):
       ])
 
 
+def metric_fn(labels, logits):
+  accuracy = (
+    tf.no_op() if tf.contrib.distribute.has_distribution_strategy()
+    else tf.metrics.accuracy(
+        labels=labels, predictions=tf.argmax(logits, axis=1))
+  )
+  return {"accuracy": accuracy}
+
+
 def model_fn(features, labels, mode, params):
   """The model_fn argument for creating an Estimator."""
-  model = create_model(params['data_format'])
+  use_tpu = params["use_tpu"]  # type: bool
+
+  model = create_model(params['data_format'])  # type: tf.keras.Sequential
   image = features
   if isinstance(image, dict):
     image = features['image']
 
   if mode == tf.estimator.ModeKeys.PREDICT:
+    if use_tpu:
+      raise RuntimeError("mode PREDICT is not yet supported for TPUs.")
+
     logits = model(image, training=False)
     predictions = {
-        'classes': tf.argmax(logits, axis=1),
-        'probabilities': tf.nn.softmax(logits),
+      'classes': tf.argmax(logits, axis=1),
+      'probabilities': tf.nn.softmax(logits),
     }
     return tf.estimator.EstimatorSpec(
-        mode=tf.estimator.ModeKeys.PREDICT,
+        mode=mode,
         predictions=predictions,
         export_outputs={
-            'classify': tf.estimator.export.PredictOutput(predictions)
+          'classify': tf.estimator.export.PredictOutput(predictions)
         })
+
   if mode == tf.estimator.ModeKeys.TRAIN:
     optimizer = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)
-
-    # If we are running multi-GPU, we need to wrap the optimizer.
-    if params.get('multi_gpu'):
-      optimizer = tf.contrib.estimator.TowerOptimizer(optimizer)
-
+    if use_tpu:
+      optimizer = tf.contrib.tpu.CrossShardOptimizer(optimizer)
     logits = model(image, training=True)
     loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
-    accuracy = tf.metrics.accuracy(
-        labels=labels, predictions=tf.argmax(logits, axis=1))
 
     # Name tensors to be logged with LoggingTensorHook.
     tf.identity(LEARNING_RATE, 'learning_rate')
@@ -121,133 +139,161 @@ def model_fn(features, labels, mode, params):
     tf.identity(accuracy[1], name='train_accuracy')
 
     # Save accuracy scalar to Tensorboard output.
-    tf.summary.scalar('train_accuracy', accuracy[1])
+    if not tf.contrib.distribute.has_distribution_strategy():
+      tf.summary.scalar('train_accuracy', accuracy[1])
 
-    return tf.estimator.EstimatorSpec(
-        mode=tf.estimator.ModeKeys.TRAIN,
+    minimize_op=optimizer.minimize(loss, tf.train.get_or_create_global_step())
+    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+
+    spec_args = dict(
+        mode=mode,
         loss=loss,
-        train_op=optimizer.minimize(loss, tf.train.get_or_create_global_step()))
+        train_op=tf.group(minimize_op, update_ops)
+    )
+    if use_tpu:
+      return tf.contrib.tpu.TPUEstimatorSpec(**spec_args)
+    return tf.estimator.EstimatorSpec(**spec_args)
+
   if mode == tf.estimator.ModeKeys.EVAL:
     logits = model(image, training=False)
     loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
+    if use_tpu:
+      return tf.contrib.tpu.TPUEstimatorSpec(
+          mode=mode,
+          loss=loss,
+          eval_metrics=(metric_fn, [labels, logits])
+      )
     return tf.estimator.EstimatorSpec(
-        mode=tf.estimator.ModeKeys.EVAL,
+        mode=mode,
         loss=loss,
-        eval_metric_ops={
-            'accuracy':
-                tf.metrics.accuracy(
-                    labels=labels, predictions=tf.argmax(logits, axis=1)),
-        })
+        eval_metric_ops=metric_fn(labels=labels, logits=logits)
+    )
 
 
-def validate_batch_size_for_multi_gpu(batch_size):
-  """For multi-gpu, batch-size must be a multiple of the number of GPUs.
+def construct_estimator(flags, use_tpu):
+  use_gpu = flags.num_gpus > 0
 
-  Note that this should eventually be handled by replicate_model_fn
-  directly. Multi-GPU support is currently experimental, however,
-  so doing the work here until that feature is in place.
+  data_format = flags.data_format
+  if data_format is None:
+    data_format = ('channels_first' if use_gpu or use_tpu else 'channels_last')
 
-  Args:
-    batch_size: the number of examples processed in each training batch.
+  params = {"use_tpu": use_tpu, "data_format": data_format}
+  session_config=tf.ConfigProto(
+      allow_soft_placement=True,
+      log_device_placement=use_tpu
+  )
 
-  Raises:
-    ValueError: if no GPUs are found, or selected batch_size is invalid.
-  """
-  from tensorflow.python.client import device_lib  # pylint: disable=g-import-not-at-top
+  if use_tpu:
+    tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
+        flags.tpu,
+        zone=flags.tpu_zone,
+        project=flags.tpu_gcp_project
+    )
+    run_config = tf.contrib.tpu.RunConfig(
+        cluster=tpu_cluster_resolver,
+        model_dir=flags.model_dir,
+        session_config=session_config,
+        tpu_config=tf.contrib.tpu.TPUConfig(
+            iterations_per_loop=flags.iterations_per_loop,
+            num_shards=flags.num_tpu_shards)
+    )
+    return tf.contrib.tpu.TPUEstimator(
+        model_fn=model_fn,
+        use_tpu=True,
+        train_batch_size=flags.batch_size,
+        eval_batch_size=flags.batch_size,
+        params=params,
+        config=run_config)
 
-  local_device_protos = device_lib.list_local_devices()
-  num_gpus = sum([1 for d in local_device_protos if d.device_type == 'GPU'])
-  if not num_gpus:
-    raise ValueError('Multi-GPU mode was specified, but no GPUs '
-                     'were found. To use CPU, run without --multi_gpu.')
+  if flags.num_gpus == 0:
+    distribution = tf.contrib.distribute.OneDeviceStrategy('device:CPU:0')
+  elif flags.num_gpus == 1:
+    distribution = tf.contrib.distribute.OneDeviceStrategy('device:GPU:0')
+  else:
+    distribution = tf.contrib.distribute.MirroredStrategy(
+        num_gpus=flags.num_gpus
+    )
 
-  remainder = batch_size % num_gpus
-  if remainder:
-    err = ('When running with multiple GPUs, batch size '
-           'must be a multiple of the number of available GPUs. '
-           'Found {} GPUs with a batch size of {}; try --batch_size={} instead.'
-          ).format(num_gpus, batch_size, batch_size - remainder)
-    raise ValueError(err)
+  run_config = tf.estimator.RunConfig(
+      model_dir=flags.model_dir,
+      train_distribute=distribution,
+      session_config=session_config
+  )
+  return tf.estimator.Estimator(
+      model_fn=model_fn,
+      config=run_config,
+      params=params
+  )
 
 
 def main(argv):
   parser = MNISTArgParser()
   flags = parser.parse_args(args=argv[1:])
+  use_tpu = flags.tpu is not None
 
-  model_function = model_fn
-
-  if flags.multi_gpu:
-    validate_batch_size_for_multi_gpu(flags.batch_size)
-
-    # There are two steps required if using multi-GPU: (1) wrap the model_fn,
-    # and (2) wrap the optimizer. The first happens here, and (2) happens
-    # in the model_fn itself when the optimizer is defined.
-    model_function = tf.contrib.estimator.replicate_model_fn(
-        model_fn, loss_reduction=tf.losses.Reduction.MEAN)
-
-  data_format = flags.data_format
-  if data_format is None:
-    data_format = ('channels_first'
-                   if tf.test.is_built_with_cuda() else 'channels_last')
-  mnist_classifier = tf.estimator.Estimator(
-      model_fn=model_function,
-      model_dir=flags.model_dir,
-      params={
-          'data_format': data_format,
-          'multi_gpu': flags.multi_gpu
-      })
-
-  # Set up training and evaluation input functions.
-  def train_input_fn():
-    """Prepare data for training."""
-
-    # When choosing shuffle buffer sizes, larger sizes result in better
-    # randomness, while smaller sizes use less memory. MNIST is a small
-    # enough dataset that we can easily shuffle the full epoch.
-    ds = dataset.train(flags.data_dir)
-    ds = ds.cache().shuffle(buffer_size=50000).batch(flags.batch_size)
-
-    # Iterate through the dataset a set number (`epochs_between_evals`) of times
-    # during each training session.
-    ds = ds.repeat(flags.epochs_between_evals)
-    return ds
-
-  def eval_input_fn():
-    return dataset.test(flags.data_dir).batch(
-        flags.batch_size).make_one_shot_iterator().get_next()
+  mnist_classifier = construct_estimator(flags=flags, use_tpu=use_tpu)
 
   # Set up hook that outputs training logs every 100 steps.
   train_hooks = hooks_helper.get_train_hooks(
       flags.hooks, batch_size=flags.batch_size)
 
+  if use_tpu:
+    max_train_steps = (mnist_dataset.NUM_IMAGES["train"] *
+                       flags.epochs_between_evals // flags.batch_size)
+    eval_steps = mnist_dataset.NUM_IMAGES["validation"] // flags.batch_size
+  else:
+    max_train_steps, eval_steps = None, None
+
+  @device.retry_timeouts(num_attempts=3)
+  def train():
+    train_input_fn = mnist_dataset.make_training_input_fn(
+        data_dir=flags.data_dir, use_tpu=use_tpu,
+        default_batch_size=flags.batch_size,
+        repeat_epochs=flags.epochs_between_evals)
+
+    mnist_classifier.train(input_fn=train_input_fn, hooks=train_hooks,
+                           steps=max_train_steps)
+
+  @device.retry_timeouts(num_attempts=3)
+  def evaluate():
+    eval_input_fn = mnist_dataset.make_eval_input_fn(
+        data_dir=flags.data_dir, use_tpu=use_tpu,
+        default_batch_size=flags.batch_size)
+
+    return mnist_classifier.evaluate(
+        input_fn=eval_input_fn, steps=eval_steps)
+
   # Train and evaluate model.
   for _ in range(flags.train_epochs // flags.epochs_between_evals):
-    mnist_classifier.train(input_fn=train_input_fn, hooks=train_hooks)
-    eval_results = mnist_classifier.evaluate(input_fn=eval_input_fn)
+    train()
+    eval_results = evaluate()
     print('\nEvaluation results:\n\t%s\n' % eval_results)
 
-    if model_helpers.past_stop_threshold(flags.stop_threshold,
-                                         eval_results['accuracy']):
+    if model_helpers.past_stop_threshold(
+        flags.stop_threshold, eval_results['accuracy']):
       break
 
   # Export the model
   if flags.export_dir is not None:
-    image = tf.placeholder(tf.float32, [None, 28, 28])
+    image = tf.placeholder(
+        tf.float32, [None, mnist_dataset.NUM_IMAGES, mnist_dataset.NUM_IMAGES])
     input_fn = tf.estimator.export.build_raw_serving_input_receiver_fn({
         'image': image,
     })
     mnist_classifier.export_savedmodel(flags.export_dir, input_fn)
 
 
-class MNISTArgParser(argparse.ArgumentParser):
+class MNISTArgParser(base.Parser):
   """Argument parser for running MNIST model."""
 
-  def __init__(self):
+  def __init__(self, simple_help=True):
     super(MNISTArgParser, self).__init__(parents=[
-        parsers.BaseParser(),
+        parsers.BaseParser(multi_gpu=False),
+        accelerator.Parser(simple_help=simple_help, num_gpus=True, tpu=True),
         parsers.ImageModelParser(),
-        parsers.ExportParser(),
-    ])
+        parsers.ExportParser()],
+        simple_help=simple_help
+    )
 
     self.set_defaults(
         data_dir='/tmp/mnist_data',
