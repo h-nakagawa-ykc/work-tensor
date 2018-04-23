@@ -96,3 +96,10 @@ def construct_estimator(flags, use_tpu, model_fn, params):
       config=run_config,
       params=params
   )
+
+
+def accuracy(labels, logits):
+  if tf.contrib.distribute.has_distribution_strategy():
+    return tf.Variable(0, dtype=tf.float32), tf.no_op()
+  return tf.metrics.accuracy(
+      labels=labels, predictions=tf.argmax(logits, axis=1))

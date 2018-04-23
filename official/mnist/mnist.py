@@ -37,6 +37,7 @@ LEARNING_RATE = 1e-4
 
 
 def create_model(data_format, image_size=mnist_dataset.IMAGE_SIZE):
+  # type: (str, int) -> tf.keras.Sequential
   """Model to recognize digits in the MNIST dataset.
 
   Network structure is equivalent to:
@@ -92,13 +93,31 @@ def create_model(data_format, image_size=mnist_dataset.IMAGE_SIZE):
       ])
 
 
-def metric_fn(labels, logits):
-  accuracy = (
-    tf.no_op() if tf.contrib.distribute.has_distribution_strategy()
-    else tf.metrics.accuracy(
-        labels=labels, predictions=tf.argmax(logits, axis=1))
-  )
-  return {"accuracy": accuracy}
+def construct_host_call(loss, labels, logits):
+  """Create a training host call.
+
+  https://www.tensorflow.org/api_docs/python/tf/contrib/tpu/TPUEstimatorSpec
+
+  During TPU training, summary ops need to be executed on the CPU rather than
+  the TPU. To this end TPUEstimatorSpec provides a host_call field to specify
+  ops to be run on the CPU. There are, however, several significant
+  restrictions:
+    1) The host call function must be purely functional. Do not use ops which
+       have already been created when defining the host call, as XLA rewrites
+       ops during TPU training.
+    2) Inputs must be Tensors with shape [batch]. (Hence the tf.reshape())
+  """
+  def host_call_fn(lr, ls, ac):
+    return [
+      tf.identity(lr[0], "learning_rate"),
+      tf.identity(ls[0], "cross_entropy"),
+      tf.identity(ac[0], "train_accuracy"),
+      tf.summary.scalar("train_accuracy", ac[0])
+    ]
+  lr_t = tf.reshape(tf.Variable(LEARNING_RATE, dtype=tf.float32), [1])
+  ls_t = tf.reshape(loss, [1])
+  ac_t = tf.reshape(device.accuracy(labels=labels, logits=logits)[1], [1])
+  return host_call_fn, [lr_t, ls_t, ac_t]
 
 
 def model_fn(features, labels, mode, params):
@@ -132,15 +151,7 @@ def model_fn(features, labels, mode, params):
       optimizer = tf.contrib.tpu.CrossShardOptimizer(optimizer)
     logits = model(image, training=True)
     loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
-
-    # Name tensors to be logged with LoggingTensorHook.
-    tf.identity(LEARNING_RATE, 'learning_rate')
-    tf.identity(loss, 'cross_entropy')
-    tf.identity(accuracy[1], name='train_accuracy')
-
-    # Save accuracy scalar to Tensorboard output.
-    if not tf.contrib.distribute.has_distribution_strategy():
-      tf.summary.scalar('train_accuracy', accuracy[1])
+    host_call = construct_host_call(loss=loss, labels=labels, logits=logits)
 
     minimize_op=optimizer.minimize(loss, tf.train.get_or_create_global_step())
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -151,10 +162,15 @@ def model_fn(features, labels, mode, params):
         train_op=tf.group(minimize_op, update_ops)
     )
     if use_tpu:
+      # spec_args["host_call"] = host_call
       return tf.contrib.tpu.TPUEstimatorSpec(**spec_args)
+    host_call[0](*host_call[1])
     return tf.estimator.EstimatorSpec(**spec_args)
 
   if mode == tf.estimator.ModeKeys.EVAL:
+    def metric_fn(labels_in, logits_in):
+      return {"accuracy": device.accuracy(labels=labels_in, logits=logits_in)}
+
     logits = model(image, training=False)
     loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
     if use_tpu:
@@ -166,7 +182,7 @@ def model_fn(features, labels, mode, params):
     return tf.estimator.EstimatorSpec(
         mode=mode,
         loss=loss,
-        eval_metric_ops=metric_fn(labels=labels, logits=logits)
+        eval_metric_ops=metric_fn(labels_in=labels, logits_in=logits)
     )
 
 
@@ -192,6 +208,7 @@ def main(argv):
   # Set up hook that outputs training logs every 100 steps.
   train_hooks = hooks_helper.get_train_hooks(
       flags.hooks, batch_size=flags.batch_size)
+  train_hooks = []
 
   if use_tpu:
     max_train_steps = (mnist_dataset.NUM_IMAGES["train"] *
@@ -200,7 +217,7 @@ def main(argv):
   else:
     max_train_steps, eval_steps = None, None
 
-  @device.retry_timeouts(num_attempts=3)
+  # @device.retry_timeouts(num_attempts=1)
   def train():
     train_input_fn = mnist_dataset.make_training_input_fn(
         data_dir=flags.data_dir, use_tpu=use_tpu,
@@ -210,7 +227,7 @@ def main(argv):
     mnist_classifier.train(input_fn=train_input_fn, hooks=train_hooks,
                            steps=max_train_steps)
 
-  @device.retry_timeouts(num_attempts=3)
+  # @device.retry_timeouts(num_attempts=1)
   def evaluate():
     eval_input_fn = mnist_dataset.make_eval_input_fn(
         data_dir=flags.data_dir, use_tpu=use_tpu,
