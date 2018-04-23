@@ -178,52 +178,8 @@ def construct_estimator(flags, use_tpu):
     data_format = ('channels_first' if use_gpu or use_tpu else 'channels_last')
 
   params = {"use_tpu": use_tpu, "data_format": data_format}
-  session_config=tf.ConfigProto(
-      allow_soft_placement=True,
-      log_device_placement=use_tpu
-  )
-
-  if use_tpu:
-    tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
-        flags.tpu,
-        zone=flags.tpu_zone,
-        project=flags.tpu_gcp_project
-    )
-    run_config = tf.contrib.tpu.RunConfig(
-        cluster=tpu_cluster_resolver,
-        model_dir=flags.model_dir,
-        session_config=session_config,
-        tpu_config=tf.contrib.tpu.TPUConfig(
-            iterations_per_loop=flags.iterations_per_loop,
-            num_shards=flags.num_tpu_shards)
-    )
-    return tf.contrib.tpu.TPUEstimator(
-        model_fn=model_fn,
-        use_tpu=True,
-        train_batch_size=flags.batch_size,
-        eval_batch_size=flags.batch_size,
-        params=params,
-        config=run_config)
-
-  if flags.num_gpus == 0:
-    distribution = tf.contrib.distribute.OneDeviceStrategy('device:CPU:0')
-  elif flags.num_gpus == 1:
-    distribution = tf.contrib.distribute.OneDeviceStrategy('device:GPU:0')
-  else:
-    distribution = tf.contrib.distribute.MirroredStrategy(
-        num_gpus=flags.num_gpus
-    )
-
-  run_config = tf.estimator.RunConfig(
-      model_dir=flags.model_dir,
-      train_distribute=distribution,
-      session_config=session_config
-  )
-  return tf.estimator.Estimator(
-      model_fn=model_fn,
-      config=run_config,
-      params=params
-  )
+  return device.construct_estimator(flags=flags, use_tpu=use_tpu,
+                                    model_fn=model_fn, params=params)
 
 
 def main(argv):
