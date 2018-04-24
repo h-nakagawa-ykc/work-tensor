@@ -20,6 +20,7 @@ from __future__ import print_function
 import argparse
 import os
 import sys
+from typing import Dict, List, Union
 
 import tensorflow as tf  # pylint: disable=g-bad-import-order
 
@@ -59,10 +60,10 @@ def create_model(data_format, image_size=mnist_dataset.IMAGE_SIZE):
     A tf.keras.Model.
   """
   if data_format == 'channels_first':
-    input_shape = [1, image_size, image_size]
+    target_shape = [1, image_size, image_size]
   else:
     assert data_format == 'channels_last'
-    input_shape = [image_size, image_size, 1]
+    target_shape = [image_size, image_size, 1]
 
   l = tf.keras.layers
   max_pool = l.MaxPooling2D(
@@ -71,7 +72,7 @@ def create_model(data_format, image_size=mnist_dataset.IMAGE_SIZE):
   # (a subclass of tf.keras.Model) makes for a compact description.
   return tf.keras.Sequential(
       [
-          l.Reshape(input_shape),
+          l.Reshape(target_shape, input_shape=(image_size, image_size)),
           l.Conv2D(
               filters=32,
               kernel_size=5,
@@ -91,33 +92,6 @@ def create_model(data_format, image_size=mnist_dataset.IMAGE_SIZE):
           l.Dropout(0.4),
           l.Dense(10)
       ])
-
-
-def construct_host_call(loss, labels, logits):
-  """Create a training host call.
-
-  https://www.tensorflow.org/api_docs/python/tf/contrib/tpu/TPUEstimatorSpec
-
-  During TPU training, summary ops need to be executed on the CPU rather than
-  the TPU. To this end TPUEstimatorSpec provides a host_call field to specify
-  ops to be run on the CPU. There are, however, several significant
-  restrictions:
-    1) The host call function must be purely functional. Do not use ops which
-       have already been created when defining the host call, as XLA rewrites
-       ops during TPU training.
-    2) Inputs must be Tensors with shape [batch]. (Hence the tf.reshape())
-  """
-  def host_call_fn(lr, ls, ac):
-    return [
-      tf.identity(lr[0], "learning_rate"),
-      tf.identity(ls[0], "cross_entropy"),
-      tf.identity(ac[0], "train_accuracy"),
-      tf.summary.scalar("train_accuracy", ac[0])
-    ]
-  lr_t = tf.reshape(tf.Variable(LEARNING_RATE, dtype=tf.float32), [1])
-  ls_t = tf.reshape(loss, [1])
-  ac_t = tf.reshape(device.accuracy(labels=labels, logits=logits)[1], [1])
-  return host_call_fn, [lr_t, ls_t, ac_t]
 
 
 def model_fn(features, labels, mode, params):
@@ -151,7 +125,13 @@ def model_fn(features, labels, mode, params):
       optimizer = tf.contrib.tpu.CrossShardOptimizer(optimizer)
     logits = model(image, training=True)
     loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
-    host_call = construct_host_call(loss=loss, labels=labels, logits=logits)
+
+    # Define function to save scalars for LoggingTensorHook and TensorBoard
+    host_call = device.construct_scalar_host_call({
+      "learning_rate": tf.Variable(LEARNING_RATE, dtype=tf.float32),
+      "cross_entropy": loss,
+      "train_accuracy": device.accuracy(labels=labels, logits=logits)[1],
+    })
 
     minimize_op=optimizer.minimize(loss, tf.train.get_or_create_global_step())
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -162,8 +142,9 @@ def model_fn(features, labels, mode, params):
         train_op=tf.group(minimize_op, update_ops)
     )
     if use_tpu:
-      # spec_args["host_call"] = host_call
+      spec_args["host_call"] = host_call
       return tf.contrib.tpu.TPUEstimatorSpec(**spec_args)
+    # If not on a TPU, the host call can simply be evaluated directly.
     host_call[0](*host_call[1])
     return tf.estimator.EstimatorSpec(**spec_args)
 
@@ -201,6 +182,9 @@ def construct_estimator(flags, use_tpu):
 def main(argv):
   parser = MNISTArgParser()
   flags = parser.parse_args(args=argv[1:])
+  if flags.clean and tf.gfile.Exists(flags.model_dir):
+    tf.gfile.DeleteRecursively(flags.model_dir)
+
   use_tpu = flags.tpu is not None
 
   mnist_classifier = construct_estimator(flags=flags, use_tpu=use_tpu)
@@ -217,7 +201,7 @@ def main(argv):
   else:
     max_train_steps, eval_steps = None, None
 
-  # @device.retry_timeouts(num_attempts=1)
+  @device.retry_timeouts(num_attempts=3)
   def train():
     train_input_fn = mnist_dataset.make_training_input_fn(
         data_dir=flags.data_dir, use_tpu=use_tpu,
@@ -227,7 +211,7 @@ def main(argv):
     mnist_classifier.train(input_fn=train_input_fn, hooks=train_hooks,
                            steps=max_train_steps)
 
-  # @device.retry_timeouts(num_attempts=1)
+  @device.retry_timeouts(num_attempts=3)
   def evaluate():
     eval_input_fn = mnist_dataset.make_eval_input_fn(
         data_dir=flags.data_dir, use_tpu=use_tpu,
@@ -261,7 +245,7 @@ class MNISTArgParser(base.Parser):
 
   def __init__(self, simple_help=True):
     super(MNISTArgParser, self).__init__(parents=[
-        parsers.BaseParser(multi_gpu=False),
+        parsers.BaseParser(clean=True, multi_gpu=False),
         accelerator.Parser(simple_help=simple_help, num_gpus=True, tpu=True),
         parsers.ImageModelParser(),
         parsers.ExportParser()],

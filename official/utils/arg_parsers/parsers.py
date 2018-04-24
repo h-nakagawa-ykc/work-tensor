@@ -106,11 +106,17 @@ class BaseParser(argparse.ArgumentParser):
     hooks: Create a flag to specify hooks for logging.
   """
 
-  def __init__(self, add_help=False, data_dir=True, model_dir=True,
+  def __init__(self, add_help=False, clean=False, data_dir=True, model_dir=True,
                train_epochs=True, epochs_between_evals=True,
                stop_threshold=True, batch_size=True, multi_gpu=True,
                hooks=True):
     super(BaseParser, self).__init__(add_help=add_help)
+
+    if clean:
+      self.add_argument(
+          "--clean", action="store_true",
+          help="If set, delete model_dir before training."
+      )
 
     if data_dir:
       self.add_argument(

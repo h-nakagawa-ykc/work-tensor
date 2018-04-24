@@ -15,6 +15,7 @@
 """Collection of methods to handle corner cases for various device oddities."""
 
 import functools
+from typing import Dict
 
 import tensorflow as tf
 
@@ -96,6 +97,38 @@ def construct_estimator(flags, use_tpu, model_fn, params):
       config=run_config,
       params=params
   )
+
+
+def construct_scalar_host_call(scalar_dict):
+  # type: (Dict[str: tf.Tensor]) -> (function, Dict[str: tf.Tensor])
+  """Create a host call to save scalars for logging and TensorBoard.
+
+  When running code using TPU estimator, one occasionally wishes to evaluate ops
+  on the CPU of the host machine (the instance controlling the TPU). The most
+  common case is to record values for logging or plotting. In order to
+  accommodate this need TPUEstimatorSpec provides a host_call argument to
+  specify a function to be run on the CPU on every step.
+
+  https://github.com/tensorflow/tensorflow/blob/master/tensorflow/contrib/tpu/python/tpu/tpu_estimator.py
+
+  The use of host_call comes with several caveats:
+    1)  Communication overhead between the TPU and the host is non-trivial. For
+        this reason host_call should only be used with small tensors.
+    2)  The host call function should be a pure function. This allows the
+        host_call to respect any op rewrites performed by TPUEstimator.
+    3)  The input tensors must have rank >= 1
+  """
+  def host_call_fn(record_tensors):
+    # type: (Dict[str: tf.Tensor]) -> list
+    output = []
+    for key, value in record_tensors.items():
+      output.append(tf.identity(value[0], key))
+      output.append(tf.summary.scalar(key, value[0]))
+    return output
+
+  reshaped_scalars = {key: tf.reshape(value, [1])
+                      for key, value in scalar_dict.items()}
+  return host_call_fn, reshaped_scalars
 
 
 def accuracy(labels, logits):
