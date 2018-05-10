@@ -339,6 +339,15 @@ def define_transformer_flags():
           "and various other settings. The big parameter set increases the "
           "default batch size, embedding/hidden size, and filter size. For a "
           "complete list of parameters, please see model/model_params.py."))
+  flags.DEFINE_bool(
+      name="static_batch", default=False,
+      help=flags_core.help_wrap(
+          "Whether the batches in the dataset should have static shapes. In "
+          "general, this setting should be False. Dynamic shapes allow the "
+          "inputs to be grouped so that the number of padding tokens is "
+          "minimized, and helps model training. In cases where the input shape "
+          "must be static (e.g. running on TPU), this setting should be set to "
+          "True."))
 
   # Flags for training with steps (may be used for debugging)
   flags.DEFINE_integer(
@@ -426,6 +435,7 @@ def run_transformer(flags_obj):
   params.epochs_between_evals = flags_obj.epochs_between_evals
   params.repeat_dataset = single_iteration_train_epochs
   params.batch_size = flags_obj.batch_size or params.batch_size
+  params.static_batch = flags_obj.static_batch
 
   # Create hooks that log information about the training and metric values
   train_hooks = hooks_helper.get_train_hooks(
