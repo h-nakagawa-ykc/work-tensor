@@ -259,24 +259,6 @@ def _read_and_batch_from_files(
   return dataset
 
 
-def epochs_to_steps(num_epochs, batch_size, mode):
-  """Converts a number of epochs to a number of training steps.
-
-    TPU can not tolerate an OutOfRange error from a dataset. As a result the
-  number of examples to be processed must be known ahead of time. TPUs also
-  do not allow partial batches, so this function rounds down.
-
-  Args:
-    num_epochs: An integer of the number of epochs to convert to steps.
-    batch_size: The mini-batch size used.
-    mode: The estimator ModeKey of the computation
-
-  Returns:
-    An integer of the number of equivalent steps rounded down.
-  """
-  return NUM_EXAMPLES[mode] * num_epochs // batch_size
-
-
 def train_input_fn(params):
   """Load and return dataset of batched examples for use during training."""
   file_pattern = os.path.join(params.get("data_dir", ""), "*train*")

@@ -32,7 +32,7 @@ class Manager(object):
   """
 
   def __init__(self, train_steps, steps_between_evals, train_epochs,
-      epochs_between_evals, default_train_epochs, batch_size,
+      epochs_between_evals, default_train_epochs, batch_size, max_length,
       use_tpu=False, num_tpu_shards=8):
     if train_steps and train_epochs:
       raise ValueError("Both train_steps or train_epochs were be defined.")
@@ -48,37 +48,21 @@ class Manager(object):
       self._single_iteration_train_steps = None
       self._single_iteration_train_epochs = epochs_between_evals
 
+    self.max_length = max_length
     self.batch_size = batch_size
-    self.eval_batch_size = batch_size
     self.use_tpu = use_tpu
-
-    if self.use_tpu and self.single_iteration_eval_steps == 0:
-      num_eval = dataset.NUM_EXAMPLES[tf.estimator.ModeKeys.EVAL]
-      new_eval_batch_size = num_eval // num_tpu_shards * num_tpu_shards
-      tf.logging.info(
-          "Evaluation batch size of {} is greater than the total number of "
-          "evaluation examples ({}). TPU estimator does not permit partial "
-          "batches; the evaluation batch size has been set to {}".format(
-              self.eval_batch_size,
-              num_eval,
-              new_eval_batch_size
-          ))
-      self.eval_batch_size = new_eval_batch_size
-      assert self.single_iteration_eval_steps == 1
+    self.num_tpu_shards = num_tpu_shards
 
     if self.use_tpu:
-      assert self.batch_size % num_tpu_shards == 0
-      assert self.eval_batch_size % num_tpu_shards == 0
-
+      assert (self.batch_size // self.max_length) % self.num_tpu_shards == 0
 
   @property
   def single_iteration_train_steps(self):
     if self._single_iteration_train_steps or not self.use_tpu:
       return self._single_iteration_train_steps
 
-    return dataset.epochs_to_steps(
+    return self.epochs_to_steps(
         num_epochs=self._single_iteration_train_epochs,
-        batch_size=self.batch_size,
         mode=tf.estimator.ModeKeys.TRAIN)
 
   @property
@@ -86,9 +70,8 @@ class Manager(object):
     if not self.use_tpu:
       return None
 
-    return dataset.epochs_to_steps(
+    return self.epochs_to_steps(
         num_epochs=1,
-        batch_size=self.eval_batch_size,
         mode=tf.estimator.ModeKeys.EVAL)
 
   @property
@@ -107,3 +90,24 @@ class Manager(object):
   def repeat_dataset(self):
     # TODO(robieta@): handle TPU case of steps > 1 epoch
     return self._single_iteration_train_epochs
+
+  def epochs_to_steps(self, num_epochs, mode):
+    """Converts a number of epochs to a number of training steps.
+
+    TPU only: This function assumes that static_batch is True.
+
+      TPU can not tolerate an OutOfRange error from a dataset. As a result the
+    number of examples to be processed must be known ahead of time. TPUs also
+    do not allow partial batches, so this function rounds down.
+
+    Args:
+      num_epochs: An integer of the number of epochs to convert to steps.
+      batch_size: The mini-batch size used.
+      mode: The estimator ModeKey of the computation
+
+    Returns:
+      An integer of the number of equivalent steps rounded down.
+    """
+    assert self.use_tpu, "epochs_to_steps should only be reached when using TPU"
+    total_num_tokens = dataset.NUM_EXAMPLES[mode] * self.max_length * num_epochs
+    return total_num_tokens // self.batch_size

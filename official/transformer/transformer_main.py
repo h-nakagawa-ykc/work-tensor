@@ -446,7 +446,7 @@ def construct_estimator(flags_obj, params, schedule_manager):
       model_fn=model_fn,
       use_tpu=params["use_tpu"],
       train_batch_size=schedule_manager.batch_size,
-      eval_batch_size=schedule_manager.eval_batch_size,
+      eval_batch_size=schedule_manager.batch_size,
       params={
         # TPUEstimator needs to populate batch_size itself due to sharding.
         key: value for key, value in params.items() if key != "batch_size"},
@@ -475,6 +475,7 @@ def run_transformer(flags_obj):
       epochs_between_evals=flags_obj.epochs_between_evals,
       default_train_epochs=DEFAULT_TRAIN_EPOCHS,
       batch_size=params["batch_size"],
+      max_length=params["max_length"],
       use_tpu=params["use_tpu"],
       num_tpu_shards=flags_obj.num_tpu_shards
   )
