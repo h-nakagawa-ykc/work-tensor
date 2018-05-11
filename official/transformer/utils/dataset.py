@@ -71,7 +71,7 @@ NUM_EXAMPLES = {
   tf.estimator.ModeKeys.TRAIN: 2399123 +  # news-commentary-v12.de-en
                                1920209 +  # commoncrawl.de-en
                                270769,    # europarl-v7.de-en
-  tf.estimator.ModeKeys.EVAL: 1,  # newstest2013
+  tf.estimator.ModeKeys.EVAL: 3000,  # newstest2013
 }
 
 
