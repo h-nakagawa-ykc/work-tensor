@@ -53,3 +53,10 @@ def past_stop_threshold(stop_threshold, eval_metric):
     return True
 
   return False
+
+
+class ParameterContainer(object):
+  @property
+  def dict(self):
+    return {key: getattr(self, key) for key in dir(self) if
+            not key.startswith("_") and not key == "dict"}

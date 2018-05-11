@@ -67,6 +67,14 @@ _MIN_BOUNDARY = 8
 _BOUNDARY_SCALE = 1.1
 
 
+NUM_EXAMPLES = {
+  tf.estimator.ModeKeys.TRAIN: 2399123 +  # news-commentary-v12.de-en
+                               1920209 +  # commoncrawl.de-en
+                               270769,    # europarl-v7.de-en
+  tf.estimator.ModeKeys.EVAL: 1,  # newstest2013
+}
+
+
 def _load_records(filename):
   """Read file and return a dataset of tf.Examples."""
   return tf.data.TFRecordDataset(filename, buffer_size=_READ_RECORD_BUFFER)
@@ -190,7 +198,8 @@ def _batch_examples(dataset, batch_size, max_length):
 
 
 def _read_and_batch_from_files(
-    file_pattern, batch_size, max_length, num_parallel_calls, shuffle, repeat):
+    file_pattern, batch_size, max_length, num_parallel_calls, shuffle, repeat,
+    static_batch=False):
   """Create dataset where each item is a dict of "inputs" and "targets".
 
   Args:
@@ -201,6 +210,17 @@ def _read_and_batch_from_files(
     shuffle: If true, randomizes order of elements.
     repeat: Number of times to repeat the dataset. If None, the dataset is
       repeated forever.
+    static_batch: Whether the batches in the dataset should have static shapes.
+      If True, the input is batched so that every batch has the
+      shape [batch_size // max_length, max_length]. If False, the input is
+      grouped by length, and batched so that batches may have different
+      shapes [N, M], where:
+        N * M <= batch_size
+        M <= max_length
+      In general, this setting should be False. Dynamic shapes allow the inputs
+      to be grouped so that the number of padding tokens is minimized, and helps
+      model training. In cases where the input shape must be static
+      (e.g. running on TPU), this setting should be set to True.
 
   Returns:
     tf.data.Dataset object containing examples loaded from the files.
@@ -225,8 +245,13 @@ def _read_and_batch_from_files(
   # Remove examples where the input or target length exceeds the maximum length,
   dataset = dataset.filter(lambda x, y: _filter_max_length((x, y), max_length))
 
-  # Batch such that each batch has examples of similar length.
-  dataset = _batch_examples(dataset, batch_size, max_length)
+  if static_batch:
+    dataset = dataset.apply(tf.contrib.data.padded_batch_and_drop_remainder(
+        batch_size // max_length, ([max_length], [max_length])))
+  else:
+    # Group and batch such that each batch has examples of similar length.
+    dataset = _batch_examples(dataset, batch_size, max_length)
+
   dataset = dataset.repeat(repeat)
 
   # Prefetch the next element to improve speed of input pipeline.
@@ -234,17 +259,37 @@ def _read_and_batch_from_files(
   return dataset
 
 
+def epochs_to_steps(num_epochs, batch_size, mode):
+  """Converts a number of epochs to a number of training steps.
+
+    TPU can not tolerate an OutOfRange error from a dataset. As a result the
+  number of examples to be processed must be known ahead of time. TPUs also
+  do not allow partial batches, so this function rounds down.
+
+  Args:
+    num_epochs: An integer of the number of epochs to convert to steps.
+    batch_size: The mini-batch size used.
+    mode: The estimator ModeKey of the computation
+
+  Returns:
+    An integer of the number of equivalent steps rounded down.
+  """
+  return NUM_EXAMPLES[mode] * num_epochs // batch_size
+
+
 def train_input_fn(params):
   """Load and return dataset of batched examples for use during training."""
-  file_pattern = os.path.join(getattr(params, "data_dir", ""), "*train*")
+  file_pattern = os.path.join(params.get("data_dir", ""), "*train*")
   return _read_and_batch_from_files(
-      file_pattern, params.batch_size, params.max_length,
-      params.num_parallel_calls, shuffle=True, repeat=params.repeat_dataset)
+      file_pattern, params["batch_size"], params["max_length"],
+      params["num_parallel_calls"], shuffle=True,
+      repeat=params["repeat_dataset"], static_batch=params["static_batch"])
 
 
 def eval_input_fn(params):
   """Load and return dataset of batched examples for use during evaluation."""
-  file_pattern = os.path.join(getattr(params, "data_dir", ""), "*dev*")
+  file_pattern = os.path.join(params.get("data_dir", ""), "*dev*")
   return _read_and_batch_from_files(
-      file_pattern, params.batch_size, params.max_length,
-      params.num_parallel_calls, shuffle=False, repeat=1)
+      file_pattern, params["batch_size"], params["max_length"],
+      params["num_parallel_calls"], shuffle=False, repeat=1,
+      static_batch=params["static_batch"])

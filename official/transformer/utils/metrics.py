@@ -118,7 +118,7 @@ def get_eval_metrics(logits, labels, params):
       "accuracy_per_sequence": _convert_to_eval_metric(
           padded_sequence_accuracy)(logits, labels),
       "neg_log_perplexity": _convert_to_eval_metric(padded_neg_log_perplexity)(
-          logits, labels, params.vocab_size),
+          logits, labels, params["vocab_size"]),
       "approx_bleu_score": _convert_to_eval_metric(bleu_score)(logits, labels),
       "rouge_2_fscore": _convert_to_eval_metric(rouge_2_fscore)(logits, labels),
       "rouge_L_fscore": _convert_to_eval_metric(rouge_l_fscore)(logits, labels),

@@ -167,11 +167,11 @@ def main(unused_argv):
       os.path.join(FLAGS.data_dir, FLAGS.vocab_file))
 
   # Set up estimator and params
-  params = transformer_main.PARAMS_MAP[FLAGS.param_set]
-  params.beam_size = _BEAM_SIZE
-  params.alpha = _ALPHA
-  params.extra_decode_length = _EXTRA_DECODE_LENGTH
-  params.batch_size = _DECODE_BATCH_SIZE
+  params = transformer_main.PARAMS_MAP[FLAGS.param_set]().dict
+  params["beam_size"] = _BEAM_SIZE
+  params["alpha"] = _ALPHA
+  params["extra_decode_length"] = _EXTRA_DECODE_LENGTH
+  params["batch_size"] = _DECODE_BATCH_SIZE
   estimator = tf.estimator.Estimator(
       model_fn=transformer_main.model_fn, model_dir=FLAGS.model_dir,
       params=params)
