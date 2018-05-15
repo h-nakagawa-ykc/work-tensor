@@ -84,6 +84,15 @@ def model_fn(features, labels, mode, params):
 
     logits = output
 
+    # Explicitly set the shape of the logits for XLA (TPU). This is needed
+    # because the logits are passed back to the host VM CPU for metric
+    # evaluation, and the shape of [?, ?, vocab_size] is too vague. However
+    # it is known from Transformer that the first two dimensions of logits
+    # are the dimensions of targets. Note that the ambiguous shape of logits is
+    # not a problem when computing xentropy, because padded_cross_entropy_loss
+    # resolves the shape on the TPU.
+    logits.set_shape(targets.shape.as_list() + logits.shape.as_list()[2:])
+
     # Calculate model loss.
     xentropy, weights = metrics.padded_cross_entropy_loss(
         logits, targets, params["label_smoothing"], params["vocab_size"])
