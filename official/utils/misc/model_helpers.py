@@ -56,6 +56,16 @@ def past_stop_threshold(stop_threshold, eval_metric):
 
 
 class ParameterContainer(object):
+  """A base container object with a method to convert to a dict.
+
+  Storing parameters in objects is a very clean way to present hyperparameters.
+  However, Estimator expects a dict for params, and TPUEstimator demands it.
+
+  This class simply provides the dict property so that the practice of storing
+  hyperparamers in objects for readability is compatible with the type
+  expectations of Estimator.
+  """
+
   @property
   def dict(self):
     return {key: getattr(self, key) for key in dir(self) if
