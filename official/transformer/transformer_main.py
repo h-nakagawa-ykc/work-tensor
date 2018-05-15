@@ -94,10 +94,11 @@ def model_fn(features, labels, mode, params):
 
     if mode == tf.estimator.ModeKeys.EVAL:
       if params["use_tpu"]:
-        metric_fn = functools.partial(metrics.get_eval_metrics, params=params)
+        # metric_fn = functools.partial(metrics.get_eval_metrics, params=params)
+        eval_metrics = (lambda lbl: {"lbl": lbl}, [labels])
         return tf.contrib.tpu.TPUEstimatorSpec(
             mode=mode, loss=loss, predictions={"predictions": logits},
-            eval_metrics=(metric_fn, [logits, labels]))
+            eval_metrics=eval_metrics)
       return tf.estimator.EstimatorSpec(
           mode=mode, loss=loss, predictions={"predictions": logits},
           eval_metric_ops=metrics.get_eval_metrics(logits, labels, params))
