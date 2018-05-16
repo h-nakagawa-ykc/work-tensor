@@ -50,10 +50,10 @@ tf.app.flags.DEFINE_string('train_dir', '/tmp/cifar10_train',
                            """and checkpoint.""")
 
 # UPD START 20180516
-#testの為、訓練回数を変更
+# testの為、訓練回数を変更(1,000,000step→10,000step)
 #tf.app.flags.DEFINE_integer('max_steps', 1000000,
 #                            """Number of batches to run.""")
-tf.app.flags.DEFINE_integer('max_steps', 50000,
+tf.app.flags.DEFINE_integer('max_steps', 10000,
                             """Number of batches to run.""")
 # UPD END 20180516
 
