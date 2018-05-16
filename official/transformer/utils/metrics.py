@@ -113,16 +113,17 @@ def get_eval_metrics(logits, labels, params):
   """Return dictionary of model evaluation metrics."""
   metrics = {
       "accuracy": _convert_to_eval_metric(padded_accuracy)(logits, labels),
-  }
-
-  if not params["use_tpu"]:
-    metrics.update({
       "accuracy_top5": _convert_to_eval_metric(padded_accuracy_top5)(
           logits, labels),
       "accuracy_per_sequence": _convert_to_eval_metric(
           padded_sequence_accuracy)(logits, labels),
       "neg_log_perplexity": _convert_to_eval_metric(padded_neg_log_perplexity)(
           logits, labels, params["vocab_size"]),
+  }
+
+  if not params["use_tpu"]:
+    # TPU does not support tf.py_func
+    metrics.update({
       "approx_bleu_score": _convert_to_eval_metric(bleu_score)(logits, labels),
       "rouge_2_fscore": _convert_to_eval_metric(rouge_2_fscore)(logits, labels),
       "rouge_L_fscore": _convert_to_eval_metric(rouge_l_fscore)(logits, labels),
