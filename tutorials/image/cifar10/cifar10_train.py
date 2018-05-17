@@ -45,9 +45,15 @@ import cifar10
 
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_string('train_dir', '/tmp/cifar10_train',
+# UPD START 20180517
+# trainデータのログ出力先を変更
+#tf.app.flags.DEFINE_string('train_dir', '/tmp/cifar10_train',
+#                           """Directory where to write event logs """
+#                           """and checkpoint.""")
+tf.app.flags.DEFINE_string('train_dir', 'drive/path/to/log/tmp/cifar10_train',
                            """Directory where to write event logs """
                            """and checkpoint.""")
+# UPD END 20180517
 
 # UPD START 20180516
 # testの為、訓練回数を変更(1,000,000step → 1,000step)
